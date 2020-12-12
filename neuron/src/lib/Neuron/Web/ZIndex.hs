@@ -19,13 +19,14 @@ import qualified Clay as C
 import Data.Foldable (maximum)
 import qualified Data.Map.Strict as Map
 import Data.TagTree (mkTagPattern)
-import Data.Tree
+import qualified Data.Text as T
+import Data.Tree (Forest, Tree (..))
 import qualified Neuron.Web.Query.View as QueryView
-import Neuron.Web.Route
+import Neuron.Web.Route (NeuronWebT)
 import qualified Neuron.Web.Theme as Theme
 import Neuron.Web.Widget (elPreOverflowing)
 import Neuron.Web.Zettel.View (renderZettelParseError)
-import Neuron.Zettelkasten.Connection
+import Neuron.Zettelkasten.Connection (Connection (Folgezettel))
 import Neuron.Zettelkasten.Graph (ZettelGraph)
 import qualified Neuron.Zettelkasten.Graph as G
 import Neuron.Zettelkasten.ID (ZettelID (..))
@@ -85,17 +86,24 @@ renderZIndex ::
   DomBuilder t m =>
   Theme.Theme ->
   ZIndex ->
+  -- | Search query to filter
+  -- TODO: Finalize type of this.
+  Maybe Text ->
   NeuronWebT t m ()
-renderZIndex (Theme.semanticColor -> themeColor) ZIndex {..} = do
+renderZIndex (Theme.semanticColor -> themeColor) ZIndex {..} mq = do
   elClass "h1" "header" $ text "Zettel Index"
-  renderErrors zIndexErrors
+  divClass "errors" $ do
+    renderErrors zIndexErrors
+  forM_ mq $ \q ->
+    divClass "ui message" $ do
+      text $ "Filtering by query: " <> q
   divClass "z-index" $ do
     forM_ (nonEmpty zPinned) $ \zs ->
       divClass "ui pinned raised segment" $ do
         elClass "h3" "ui header" $ text "Pinned"
         el "ul" $
           forM_ zs $ \z ->
-            el "li" $ QueryView.renderZettelLink Nothing Nothing def z
+            zettelLink mq z (pure False)
     whenNotNull zIndexOrphans $ \(toList -> zs) ->
       divClass "ui piled segment" $ do
         elClass "p" "info" $ do
@@ -104,11 +112,10 @@ renderZIndex (Theme.semanticColor -> themeColor) ZIndex {..} = do
           text " relationships"
         el "ul" $
           forM_ zs $ \z ->
-            el "li" $ do
-              QueryView.renderZettelLink Nothing Nothing def z
+            zettelLink mq z (pure False)
     forM_ zIndexClusters $ \forest ->
       divClass ("ui " <> themeColor <> " segment") $ do
-        el "ul" $ renderForest forest
+        el "ul" $ renderForest mq forest
     el "p" $ do
       text $
         "The zettelkasten has "
@@ -123,6 +130,17 @@ renderZIndex (Theme.semanticColor -> themeColor) ZIndex {..} = do
     countNounBe noun nounPlural = \case
       1 -> "1 " <> noun
       n -> show n <> " " <> nounPlural
+
+zettelLink :: DomBuilder t m => Maybe Text -> Zettel -> NeuronWebT t m Bool -> NeuronWebT t m Bool
+zettelLink mq z w = do
+  let matched = isNothing $ do
+        q <- mq
+        guard $ not $ T.toLower q `T.isInfixOf` T.toLower (zettelTitle z)
+        pure ()
+  elClass "span" (bool "q unmatched" "q matched" matched) $ do
+    el "li" $ QueryView.renderZettelLink Nothing Nothing def z
+    childMatched <- w
+    pure $ matched || childMatched
 
 renderErrors :: DomBuilder t m => Map ZettelID (NonEmpty ZettelError) -> NeuronWebT t m ()
 renderErrors errors = do
@@ -169,19 +187,21 @@ renderErrors errors = do
 
 renderForest ::
   DomBuilder t m =>
+  Maybe Text ->
   [Tree (Zettel, [Zettel])] ->
-  NeuronWebT t m ()
-renderForest trees = do
-  forM_ trees $ \(Node (zettel, uplinks) subtrees) ->
-    el "li" $ do
-      QueryView.renderZettelLink Nothing Nothing def zettel
-      when (length uplinks >= 2) $ do
-        elClass "span" "uplinks" $ do
-          forM_ uplinks $ \z2 -> do
-            el "small" $
-              elAttr "i" ("class" =: "linkify icon" <> "title" =: zettelTitle z2) blank
-      unless (null subtrees) $ do
-        el "ul" $ renderForest subtrees
+  NeuronWebT t m Bool
+renderForest mq trees = do
+  fmap or $
+    forM trees $ \(Node (zettel, uplinks) subtrees) ->
+      zettelLink mq zettel $ do
+        when (length uplinks >= 2) $ do
+          elClass "span" "uplinks" $ do
+            forM_ uplinks $ \z2 -> do
+              el "small" $
+                elAttr "i" ("class" =: "linkify icon" <> "title" =: zettelTitle z2) blank
+        if null subtrees
+          then pure (isNothing mq)
+          else el "ul" $ renderForest mq subtrees
 
 style :: Css
 style = do
@@ -193,3 +213,13 @@ style = do
       C.paddingLeft $ em 1.5
     ".uplinks" ? do
       C.marginLeft $ em 0.3
+  -- debug: TODO: fold
+  ".errors" ? do
+    C.display C.none
+  -- Search filtering
+  ".q.unmatched" ? do
+    -- C.fontSize $ em 0.3
+    -- C.display C.none
+    C.color C.auto
+  ".q.unmatched > li" ? do
+    C.fontSize $ em 0.5
